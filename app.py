@@ -1,3 +1,4 @@
+import gc
 import numpy as np
 import streamlit as st
 import matplotlib.pyplot as plt
@@ -12,7 +13,7 @@ CLASSES = ["T-shirt", "Trouser", "Pullover", "Dress", "Coat",
            "Sandal", "Shirt", "Sneaker", "Bag", "Ankle boot"]
 
 
-@st.cache_data
+@st.cache_resource
 def load_data():
     (xtr, ytr), (xte, yte) = keras.datasets.fashion_mnist.load_data()
     xtr = xtr.astype("float32")[..., None] / 255.0
@@ -100,9 +101,12 @@ with st.sidebar:
     n_labeled = st.select_slider("Labeled images", [100, 250, 500, 1000, 2000], value=500)
     ae_epochs = st.slider("Autoencoder epochs (unlabeled)", 1, 15, 8)
     ft_epochs = st.slider("Fine-tune epochs (labeled)", 5, 50, 30)
+    n_unlab = st.select_slider("Unlabeled images for autoencoder", [5000, 10000, 30000, 60000], value=10000)
     train_btn = st.button("Train", type="primary")
 
 if train_btn:
+    keras.backend.clear_session()
+    gc.collect()
     rng = np.random.default_rng(42)
     idx = rng.choice(len(xtr), n_labeled, replace=False)
     x_lab, y_lab = xtr[idx], ytr[idx]
@@ -111,8 +115,9 @@ if train_btn:
         enc, dec = build_encoder(), build_decoder()
         ae = keras.Model(enc.input, dec(enc.output))
         ae.compile(optimizer="adam", loss="mse")
-        h1 = ae.fit(xtr, xtr, epochs=ae_epochs, batch_size=256,
-                    validation_data=(xte, xte), verbose=0)
+        xu = xtr[:n_unlab]
+        h1 = ae.fit(xu, xu, epochs=ae_epochs, batch_size=128,
+                    validation_data=(xte[:2000], xte[:2000]), verbose=0)
         recon = ae.predict(xte[:8], verbose=0)
 
     with st.spinner("Step 2: Fine-tuning on labeled data..."):
@@ -120,7 +125,7 @@ if train_btn:
         clf.compile(optimizer=keras.optimizers.Adam(1e-3),
                     loss="sparse_categorical_crossentropy", metrics=["accuracy"])
         h2 = clf.fit(x_lab, y_lab, epochs=ft_epochs, batch_size=16,
-                     validation_data=(xte, yte), verbose=0)
+                     validation_data=(xte[:2000], yte[:2000]), verbose=0)
 
     with st.spinner("Step 3: Baseline (no pretraining) for comparison..."):
         base = build_classifier(build_encoder())
@@ -128,12 +133,14 @@ if train_btn:
                      loss="sparse_categorical_crossentropy", metrics=["accuracy"])
         base.fit(x_lab, y_lab, epochs=ft_epochs, batch_size=16, verbose=0)
 
-    pre_acc = clf.evaluate(xte, yte, verbose=0)[1]
-    base_acc = base.evaluate(xte, yte, verbose=0)[1]
-    y_pred = np.argmax(clf.predict(xte, verbose=0), axis=1)
+    pre_acc = clf.evaluate(xte, yte, batch_size=256, verbose=0)[1]
+    base_acc = base.evaluate(xte, yte, batch_size=256, verbose=0)[1]
+    y_pred = np.argmax(clf.predict(xte, batch_size=256, verbose=0), axis=1)
+    del base, ae, dec
+    gc.collect()
 
     st.session_state["res"] = dict(clf=clf, pre=pre_acc, base=base_acc, h1=h1, h2=h2,
-                                   recon=recon, y_pred=y_pred, n=n_labeled)
+                                   recon=recon, y_pred=y_pred, n=n_labeled, u=n_unlab)
 
 res = st.session_state.get("res")
 if not res:
@@ -144,7 +151,7 @@ c1, c2, c3 = st.columns(3)
 c1.metric("With AE pretraining", f"{res['pre']*100:.2f}%")
 c2.metric("Without pretraining (baseline)", f"{res['base']*100:.2f}%")
 c3.metric("Improvement", f"{(res['pre']-res['base'])*100:+.2f}%")
-st.caption(f"Only {res['n']} labeled images use hui hain; autoencoder ne 60,000 unlabeled images se features seekhe.")
+st.caption(f"Only {res['n']} labeled images use hui hain; autoencoder ne {res['u']:,} unlabeled images se features seekhe.")
 
 t1, t2, t3, t4 = st.tabs(["Training curves", "Reconstruction", "Confusion matrix", "Try it"])
 with t1:
